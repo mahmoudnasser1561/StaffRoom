@@ -1,3 +1,6 @@
+import hashlib
+import hmac
+import json
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -94,6 +97,21 @@ class ChatTestCase(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.get_json()['reply'], 'You can post markdown updates.')
 
+    def test_outbound_request_is_correctly_signed(self):
+        self.configure_service()
+        mock_response = MagicMock(status_code=200)
+        mock_response.json.return_value = {'reply': 'ok'}
+
+        with patch('App.chat.views.requests.post', return_value=mock_response) as mock_post:
+            self.client.post('/chat', json={'message': 'hi'})
+
+        sent_body = mock_post.call_args.kwargs['data']
+        headers = mock_post.call_args.kwargs['headers']
+        timestamp = headers['X-Chatbot-Timestamp']
+        message = timestamp.encode('utf-8') + b'.' + sent_body
+        expected = hmac.new(b'test-token', message, hashlib.sha256).hexdigest()
+        self.assertEqual(headers['X-Chatbot-Signature'], expected)
+
     def test_message_and_history_are_capped_before_forwarding(self):
         self.configure_service()
         long_message = 'x' * 1000
@@ -106,7 +124,7 @@ class ChatTestCase(unittest.TestCase):
             r = self.client.post('/chat', json={'message': long_message, 'history': long_history})
 
         self.assertEqual(r.status_code, 200)
-        sent = mock_post.call_args.kwargs['json']
+        sent = json.loads(mock_post.call_args.kwargs['data'])
         self.assertEqual(len(sent['message']), 500)
         self.assertLessEqual(len(sent['history']), 6)
         for item in sent['history']:
@@ -127,7 +145,7 @@ class ChatTestCase(unittest.TestCase):
             r = self.client.post('/chat', json={'message': 'hi', 'history': history})
 
         self.assertEqual(r.status_code, 200)
-        sent = mock_post.call_args.kwargs['json']
+        sent = json.loads(mock_post.call_args.kwargs['data'])
         self.assertEqual(sent['history'], [{'role': 'assistant', 'text': 'kept'}])
 
 

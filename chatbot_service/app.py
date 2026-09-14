@@ -1,4 +1,7 @@
+import hashlib
+import hmac
 import logging
+import time
 
 from flask import Flask, jsonify, request
 
@@ -10,9 +13,23 @@ log = logging.getLogger('chatbot-service')
 
 app = Flask(__name__)
 
+REPLAY_WINDOW_SECONDS = 60
+
 
 def _authorized(req):
-    return req.headers.get('X-Chatbot-Token') == config.CHATBOT_SERVICE_TOKEN
+    timestamp = req.headers.get('X-Chatbot-Timestamp')
+    signature = req.headers.get('X-Chatbot-Signature')
+    if not timestamp or not signature:
+        return False
+    try:
+        if abs(time.time() - int(timestamp)) > REPLAY_WINDOW_SECONDS:
+            return False
+    except ValueError:
+        return False
+    message = timestamp.encode('utf-8') + b'.' + req.get_data()
+    expected = hmac.new(config.CHATBOT_SERVICE_TOKEN.encode('utf-8'), message,
+                        hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature)
 
 
 @app.route('/health')
@@ -23,8 +40,8 @@ def health():
 @app.route('/answer', methods=['POST'])
 def answer():
     if not _authorized(request):
-        log.warning('rejected request with invalid or missing token')
-        return jsonify(status='error', message='invalid token'), 401
+        log.warning('rejected request with invalid or missing signature')
+        return jsonify(status='error', message='invalid signature'), 401
 
     body = request.get_json(silent=True) or {}
     message = body.get('message', '')

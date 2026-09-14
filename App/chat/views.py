@@ -1,3 +1,8 @@
+import hashlib
+import hmac
+import json
+import time
+
 import requests
 from flask import current_app, jsonify, request
 from . import chat
@@ -14,6 +19,17 @@ def _service_configured():
 
 def _service_url(path):
     return current_app.config['CHATBOT_SERVICE_URL'].rstrip('/') + path
+
+def _signed_headers(body):
+    secret = current_app.config['CHATBOT_SERVICE_TOKEN']
+    timestamp = str(int(time.time()))
+    message = timestamp.encode('utf-8') + b'.' + body
+    signature = hmac.new(secret.encode('utf-8'), message, hashlib.sha256).hexdigest()
+    return {
+        'Content-Type': 'application/json',
+        'X-Chatbot-Timestamp': timestamp,
+        'X-Chatbot-Signature': signature,
+    }
 
 def _unavailable():
     return jsonify(status='error',
@@ -50,11 +66,10 @@ def send_message():
         if role in ('user', 'assistant') and text:
             history.append({'role': role, 'text': text})
 
+    payload = json.dumps({'message': message, 'history': history}).encode('utf-8')
     try:
-        resp = requests.post(_service_url('/answer'),
-                             json={'message': message, 'history': history},
-                             headers={'X-Chatbot-Token': current_app.config['CHATBOT_SERVICE_TOKEN']},
-                             timeout=ANSWER_TIMEOUT)
+        resp = requests.post(_service_url('/answer'), data=payload,
+                             headers=_signed_headers(payload), timeout=ANSWER_TIMEOUT)
     except requests.RequestException:
         return _unavailable()
     if resp.status_code != 200:
