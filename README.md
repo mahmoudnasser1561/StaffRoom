@@ -5,14 +5,14 @@
 StaffRoom is a full-stack internal forum for teams, built with Flask —
 a private space for coworkers to post updates, comment, and keep up
 with what teammates are working on. Built and iterated on over roughly
-18 months (162 commits, March 2025 – September 2026), it started as a
+18 months (March 2025 – September 2026), it started as a
 demonstration of core Flask fundamentals (auth, roles, database
 migrations, pagination) and grew into a production-shaped app: a
 role-based permission system, a versioned JSON API, Redis-backed rate
-limiting and caching, "Sign in with Google," and an optional AI
-content-moderation service built on Amazon Bedrock — all containerized,
-all covered by an automated test suite, all running in CI on every
-push.
+limiting and caching, "Sign in with Google," and two optional AI
+services built on Amazon Bedrock — content moderation and a
+policy-answering chatbot — all containerized, all covered by an
+automated test suite, all running in CI on every push.
 
 ## Features
 
@@ -56,9 +56,28 @@ push.
 **AI-assisted content moderation (optional)**
 - A standalone service reviews new posts/comments against a written
   policy via a model on Amazon Bedrock and disables anything that
-  violates it — fully decoupled from the main app (see
-  [Engineering highlights](#engineering-highlights) and
-  [`MODERATION_PLAN.md`](MODERATION_PLAN.md) for the full design)
+  violates it — its own Docker service, its own least-privilege IAM
+  policy, and a shared audit trail with human moderator actions, fully
+  decoupled so publishing never waits on it and nothing breaks if it's
+  absent (see [AI content moderation](#ai-content-moderation-optional)
+  below and [Engineering highlights](#engineering-highlights))
+
+**AI policy chatbot (optional)**
+- A second standalone Bedrock-backed service — a chat widget open to
+  any visitor, logged in or not — that answers questions about the
+  platform's rules of use, grounded in the exact same policy document
+  the moderation service enforces. It has no tool-calling ability at
+  all (pure text generation) and never discusses anything
+  account-specific (see [Policy chatbot](#policy-chatbot-optional)
+  below)
+
+**Design**
+- A consistent, hand-built design-token system (Jinja2 templates +
+  vanilla CSS, no frontend framework or build step) applied across
+  every page — navbar, feed, profiles, forms, auth pages, moderation
+  queue, and error states all share one visual language and component
+  set instead of drifting page by page as features were added over
+  time
 
 **Infrastructure & reliability**
 - Docker Compose stack (`db`, `redis`, `web`, optional
@@ -75,8 +94,9 @@ push.
 Flask-Login, Flask-WTF, Flask-Mail, Flask-Bootstrap, Flask-PageDown,
 Flask-Limiter, Flask-Caching, Flask-HTTPAuth, Authlib (Google OAuth)
 **Data:** PostgreSQL, Redis
-**AI moderation:** boto3 (Amazon Bedrock Runtime), a standalone Python
-service with its own Dockerfile and dependency set
+**AI services:** boto3 (Amazon Bedrock Runtime) — two standalone
+Python services (content moderation, policy chatbot), each with its
+own Dockerfile and dependency set
 **Infra:** Docker / Docker Compose, gunicorn, GitHub Actions CI
 **Testing:** Python `unittest`, run in CI on every push/PR
 
@@ -122,6 +142,15 @@ lower bar than "it's built to fail safely":
   dependency version pins that only broke on a fresh install outside
   Docker's cached layers — both fixed, both now guarded against by the
   pipeline that found them.
+- **Internal service auth was evaluated, not just picked.** Both AI
+  services started out authenticating with `web` via a plain shared
+  token. Weighed against mTLS, JWT, and AWS SigV4/IAM before settling
+  on HMAC-SHA256 request signing specifically because it's a genuine
+  security upgrade (the secret never travels on the wire, requests
+  can't be replayed or tampered with) that needed zero new
+  infrastructure and zero changes to how the project is set up —
+  unlike the heavier options, which would have worked against the
+  "clone it and it runs in minutes" goal for a system this size.
 
 ## Getting Started
 
@@ -193,7 +222,8 @@ replacing them.
 flask test
 ```
 runs the full `unittest` suite (models, API, auth flows, notifications,
-moderation routes). Add `--coverage` to also generate a coverage report:
+moderation routes, the chatbot's public endpoints, and the HMAC
+request-signing logic). Add `--coverage` to also generate a coverage report:
 ```
 flask test --coverage
 ```
@@ -223,9 +253,17 @@ above) to reduce DB load on repeated reads — a change made within that
 window (e.g. a new post) can take up to 60s to show up in these three
 endpoints. Write endpoints are never cached.
 
-The AI moderation service's AWS credentials follow the same
-least-privilege principle: see [AI content moderation](#ai-content-moderation-optional)
-below for the exact IAM policy used.
+Both AI services' AWS credentials follow the same least-privilege
+principle (and are, by design, the exact same credentials — see
+[Policy chatbot](#policy-chatbot-optional) below): see
+[AI content moderation](#ai-content-moderation-optional) below for the
+exact IAM policy used.
+
+Both AI services authenticate with `web` (in either direction) using
+HMAC-SHA256 request signing rather than a plain shared token — a
+timestamp is part of what gets signed and checked against a 60-second
+window, so a captured request can't be replayed later, and the
+signing secret itself never travels over the wire.
 
 ## Sign in with Google
 
@@ -277,9 +315,16 @@ concrete boundaries, not just abstract rules.
 It's fully decoupled from the main app: publishing stays exactly as
 fast whether this service is running or not, and if it's down or
 absent, nothing breaks — content just isn't reviewed until it's back.
-See [Engineering highlights](#engineering-highlights) above and
-[`MODERATION_PLAN.md`](MODERATION_PLAN.md) for the full design and
-build log.
+Internally, publishing does a best-effort push onto a Redis queue only
+if the agent's heartbeat key is present (so nothing ever queues up
+for a consumer that isn't there); the agent does a cheap read-only
+`verify` call before spending a Bedrock call, and the actual `disable`
+call re-checks existence and content hash again independently before
+mutating anything, so an edited or deleted post is never acted on
+based on a stale snapshot. See
+[Engineering highlights](#engineering-highlights) above for the rest
+of the design decisions (the disable-only tool schema, the shared
+audit trail, the least-privilege IAM policy).
 
 **Setup:**
 
@@ -345,3 +390,50 @@ build log.
    `policy.md`'s categories should get disabled automatically, with
    the reason visible both in the logs and in an email to
    `FLASKY_ADMIN`.
+
+## Policy chatbot (optional)
+
+A second standalone Bedrock-backed service — a floating chat widget,
+visible to any visitor whether they're logged in or not — that answers
+questions about StaffRoom's rules of use. It's grounded in the exact
+same [`moderation_agent/policy.md`](moderation_agent/policy.md) the
+moderation service enforces, copied into its container via a read-only
+volume mount rather than duplicated, so the two AI features can never
+drift apart on what the rules actually are.
+
+Unlike moderation, which is deliberately asynchronous so publishing
+never waits on it, a chat reply is exactly what a visitor is waiting
+for — so this service is a synchronous request/response call instead
+of a queue. The model is given no tools at all (pure text generation,
+nothing it can act on) and never sees or discusses anything
+account-specific, only general policy questions. The widget checks a
+`/chat/status` endpoint the moment it opens; if the service isn't
+running, it shows a plain "not available" state with a Refresh button
+instead of a broken chat window, and drops back to that same state if
+the service ever goes down mid-conversation.
+
+**Setup:**
+
+If you've already set up [AI content moderation](#ai-content-moderation-optional)
+above, this needs **no additional AWS work at all** — it reuses the
+exact same `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_REGION`
+already in `.env`. Otherwise, follow steps 1-3 above first, then:
+
+1. **Add to `.env`**:
+   ```
+   CHATBOT_SERVICE_TOKEN=<generate with: python3 -c "import secrets; print(secrets.token_hex(32))">
+   ```
+   (`CHATBOT_MODEL_ID` defaults to `amazon.nova-micro-v1:0`, same as
+   moderation — only set it if you want a different model.)
+2. **Start it** — a separate opt-in service, its own profile flag:
+   ```
+   docker compose --profile chatbot up -d --build
+   ```
+   Plain `docker compose up` (no profile) never starts it.
+3. **Verify it's working**: open the site, click the chat launcher
+   (bottom-right corner), and ask a question about StaffRoom's rules —
+   you should get a grounded answer within a few seconds. If the
+   widget shows "not available," check
+   ```
+   docker compose logs chatbot-service
+   ```
