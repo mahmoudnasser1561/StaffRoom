@@ -1,4 +1,7 @@
 import hashlib
+import hmac
+import json
+import time
 import unittest
 
 from App import create_app, db, mail
@@ -38,71 +41,88 @@ class ModerationApiTestCase(unittest.TestCase):
         db.drop_all()
         self.app_context.pop()
 
-    def auth_headers(self, token='test-secret-token'):
-        return {'X-Moderation-Token': token}
+    def signed_post(self, url, payload, secret='test-secret-token', timestamp=None):
+        body = json.dumps(payload).encode('utf-8')
+        ts = timestamp if timestamp is not None else str(int(time.time()))
+        message = ts.encode('utf-8') + b'.' + body
+        signature = hmac.new(secret.encode('utf-8'), message, hashlib.sha256).hexdigest()
+        headers = {'X-Moderation-Timestamp': ts, 'X-Moderation-Signature': signature}
+        return self.client.post(url, data=body, headers=headers,
+                                content_type='application/json')
 
     # ---- verify ----
 
     def test_verify_not_found(self):
-        r = self.client.post('/api/v1/moderation/posts/999999/verify',
-                             json={'content_hash': self.post_hash},
-                             headers=self.auth_headers())
+        r = self.signed_post('/api/v1/moderation/posts/999999/verify',
+                             {'content_hash': self.post_hash})
         self.assertEqual(r.status_code, 404)
         self.assertEqual(r.get_json()['status'], 'not_found')
 
     def test_verify_stale(self):
-        r = self.client.post(f'/api/v1/moderation/posts/{self.post.id}/verify',
-                             json={'content_hash': 'wronghash'},
-                             headers=self.auth_headers())
+        r = self.signed_post(f'/api/v1/moderation/posts/{self.post.id}/verify',
+                             {'content_hash': 'wronghash'})
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.get_json()['status'], 'stale')
 
     def test_verify_ok(self):
-        r = self.client.post(f'/api/v1/moderation/posts/{self.post.id}/verify',
-                             json={'content_hash': self.post_hash},
-                             headers=self.auth_headers())
+        r = self.signed_post(f'/api/v1/moderation/posts/{self.post.id}/verify',
+                             {'content_hash': self.post_hash})
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.get_json()['status'], 'ok')
 
     def test_verify_comment_route(self):
-        r = self.client.post(f'/api/v1/moderation/comments/{self.comment.id}/verify',
-                             json={'content_hash': self.comment_hash},
-                             headers=self.auth_headers())
+        r = self.signed_post(f'/api/v1/moderation/comments/{self.comment.id}/verify',
+                             {'content_hash': self.comment_hash})
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.get_json()['status'], 'ok')
 
-    def test_verify_wrong_token(self):
+    def test_verify_wrong_secret(self):
+        r = self.signed_post(f'/api/v1/moderation/posts/{self.post.id}/verify',
+                             {'content_hash': self.post_hash}, secret='wrong')
+        self.assertEqual(r.status_code, 401)
+
+    def test_verify_stale_timestamp_rejected(self):
+        old_timestamp = str(int(time.time()) - 120)
+        r = self.signed_post(f'/api/v1/moderation/posts/{self.post.id}/verify',
+                             {'content_hash': self.post_hash}, timestamp=old_timestamp)
+        self.assertEqual(r.status_code, 401)
+
+    def test_verify_tampered_body_rejected(self):
+        body = json.dumps({'content_hash': self.post_hash}).encode('utf-8')
+        ts = str(int(time.time()))
+        message = ts.encode('utf-8') + b'.' + body
+        signature = hmac.new(b'test-secret-token', message, hashlib.sha256).hexdigest()
+        tampered_body = json.dumps({'content_hash': 'wronghash'}).encode('utf-8')
         r = self.client.post(f'/api/v1/moderation/posts/{self.post.id}/verify',
-                             json={'content_hash': self.post_hash},
-                             headers=self.auth_headers('wrong'))
+                             data=tampered_body,
+                             headers={'X-Moderation-Timestamp': ts,
+                                     'X-Moderation-Signature': signature},
+                             content_type='application/json')
         self.assertEqual(r.status_code, 401)
 
     # ---- disable: auth ----
 
-    def test_disable_missing_token(self):
+    def test_disable_missing_signature(self):
         r = self.client.post(f'/api/v1/moderation/posts/{self.post.id}/disable',
                              json={'reason': 'bad', 'content_hash': self.post_hash})
         self.assertEqual(r.status_code, 401)
 
-    def test_disable_wrong_token(self):
-        r = self.client.post(f'/api/v1/moderation/posts/{self.post.id}/disable',
-                             json={'reason': 'bad', 'content_hash': self.post_hash},
-                             headers=self.auth_headers('wrong'))
+    def test_disable_wrong_secret(self):
+        r = self.signed_post(f'/api/v1/moderation/posts/{self.post.id}/disable',
+                             {'reason': 'bad', 'content_hash': self.post_hash}, secret='wrong')
         self.assertEqual(r.status_code, 401)
 
     # ---- disable: validation ----
 
     def test_disable_not_found(self):
-        r = self.client.post('/api/v1/moderation/posts/999999/disable',
-                             json={'reason': 'bad', 'content_hash': self.post_hash},
-                             headers=self.auth_headers())
+        r = self.signed_post('/api/v1/moderation/posts/999999/disable',
+                             {'reason': 'bad', 'content_hash': self.post_hash})
         self.assertEqual(r.status_code, 404)
         self.assertEqual(r.get_json()['status'], 'not_found')
 
     def test_disable_stale_skipped(self):
-        r = self.client.post(f'/api/v1/moderation/posts/{self.post.id}/disable',
-                             json={'reason': 'bad', 'content_hash': 'wronghash'},
-                             headers=self.auth_headers())
+        r = self.signed_post(f'/api/v1/moderation/posts/{self.post.id}/disable',
+                             {'reason': 'bad', 'content_hash': 'wronghash'})
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.get_json()['status'], 'stale_skipped')
         db.session.refresh(self.post)
@@ -110,9 +130,8 @@ class ModerationApiTestCase(unittest.TestCase):
         self.assertEqual(ModerationFlag.query.count(), 0)
 
     def test_disable_empty_reason_rejected(self):
-        r = self.client.post(f'/api/v1/moderation/posts/{self.post.id}/disable',
-                             json={'reason': '   ', 'content_hash': self.post_hash},
-                             headers=self.auth_headers())
+        r = self.signed_post(f'/api/v1/moderation/posts/{self.post.id}/disable',
+                             {'reason': '   ', 'content_hash': self.post_hash})
         self.assertEqual(r.status_code, 400)
         db.session.refresh(self.post)
         self.assertFalse(bool(self.post.disabled))
@@ -123,9 +142,8 @@ class ModerationApiTestCase(unittest.TestCase):
         db.session.commit()
 
         with mail.record_messages() as outbox:
-            r = self.client.post(f'/api/v1/moderation/posts/{self.post.id}/disable',
-                                 json={'reason': 'again', 'content_hash': self.post_hash},
-                                 headers=self.auth_headers())
+            r = self.signed_post(f'/api/v1/moderation/posts/{self.post.id}/disable',
+                                 {'reason': 'again', 'content_hash': self.post_hash})
             self.assertEqual(r.status_code, 200)
             self.assertEqual(r.get_json()['status'], 'already_disabled')
 
@@ -136,9 +154,8 @@ class ModerationApiTestCase(unittest.TestCase):
     # ---- disable: success path (full pipeline) ----
 
     def test_disable_post_success_creates_flag(self):
-        r = self.client.post(f'/api/v1/moderation/posts/{self.post.id}/disable',
-                             json={'reason': 'Spam', 'content_hash': self.post_hash},
-                             headers=self.auth_headers())
+        r = self.signed_post(f'/api/v1/moderation/posts/{self.post.id}/disable',
+                             {'reason': 'Spam', 'content_hash': self.post_hash})
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.get_json()['status'], 'disabled')
 
@@ -152,9 +169,8 @@ class ModerationApiTestCase(unittest.TestCase):
         self.assertEqual(flag.user_id, self.author.id)
 
     def test_disable_comment_success_sets_both_post_and_comment_id(self):
-        r = self.client.post(f'/api/v1/moderation/comments/{self.comment.id}/disable',
-                             json={'reason': 'Harassment', 'content_hash': self.comment_hash},
-                             headers=self.auth_headers())
+        r = self.signed_post(f'/api/v1/moderation/comments/{self.comment.id}/disable',
+                             {'reason': 'Harassment', 'content_hash': self.comment_hash})
         self.assertEqual(r.status_code, 200)
 
         db.session.refresh(self.comment)

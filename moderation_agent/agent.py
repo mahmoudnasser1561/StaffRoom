@@ -1,4 +1,8 @@
+import hashlib
+import hmac
+import json
 import logging
+import time
 
 import redis
 import requests
@@ -24,20 +28,33 @@ def _endpoint(job, action):
     return f'{config.MODERATION_API_BASE_URL}/api/v1/moderation/{kind}/{job.id}/{action}'
 
 
-def _headers():
-    return {'X-Moderation-Token': config.MODERATION_SERVICE_TOKEN}
+def _sign(timestamp, body):
+    message = timestamp.encode('utf-8') + b'.' + body
+    return hmac.new(config.MODERATION_SERVICE_TOKEN.encode('utf-8'), message,
+                    hashlib.sha256).hexdigest()
+
+
+def _signed_request(payload):
+    body = json.dumps(payload).encode('utf-8')
+    timestamp = str(int(time.time()))
+    headers = {
+        'Content-Type': 'application/json',
+        'X-Moderation-Timestamp': timestamp,
+        'X-Moderation-Signature': _sign(timestamp, body),
+    }
+    return body, headers
 
 
 def call_verify(job):
+    body, headers = _signed_request({'content_hash': job.content_hash})
     try:
-        resp = requests.post(_endpoint(job, 'verify'),
-                             json={'content_hash': job.content_hash},
-                             headers=_headers(), timeout=REQUEST_TIMEOUT)
+        resp = requests.post(_endpoint(job, 'verify'), data=body,
+                             headers=headers, timeout=REQUEST_TIMEOUT)
     except requests.RequestException as e:
         log.warning('verify request failed for %s %s: %s', job.type, job.id, e)
         return None
     if resp.status_code == 401:
-        log.error('verify rejected: invalid moderation service token')
+        log.error('verify rejected: invalid moderation service signature')
         return None
     if resp.status_code >= 500:
         log.warning('verify returned %s for %s %s', resp.status_code, job.type, job.id)
@@ -46,15 +63,15 @@ def call_verify(job):
 
 
 def call_disable(job, reason):
+    body, headers = _signed_request({'reason': reason, 'content_hash': job.content_hash})
     try:
-        resp = requests.post(_endpoint(job, 'disable'),
-                             json={'reason': reason, 'content_hash': job.content_hash},
-                             headers=_headers(), timeout=REQUEST_TIMEOUT)
+        resp = requests.post(_endpoint(job, 'disable'), data=body,
+                             headers=headers, timeout=REQUEST_TIMEOUT)
     except requests.RequestException as e:
         log.warning('disable request failed for %s %s: %s', job.type, job.id, e)
         return None
     if resp.status_code == 401:
-        log.error('disable rejected: invalid moderation service token')
+        log.error('disable rejected: invalid moderation service signature')
         return None
     if resp.status_code >= 500:
         log.warning('disable returned %s for %s %s', resp.status_code, job.type, job.id)
