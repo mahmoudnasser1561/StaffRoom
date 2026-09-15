@@ -667,6 +667,7 @@ div.post-tabs ul.posts {
     margin: 0;
 }
 li.post {
+    position: relative;
     display: flex;
     gap: var(--space-3);
     background-color: var(--color-surface);
@@ -676,6 +677,16 @@ li.post {
     padding: var(--space-3);
     margin-bottom: var(--space-3);
     transition: var(--transition);
+    cursor: pointer;
+}
+a.post-stretched-link {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+}
+li.post a:not(.post-stretched-link) {
+    position: relative;
+    z-index: 2;
 }
 li.post:hover {
     box-shadow: var(--shadow-md);

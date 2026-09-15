@@ -1,6 +1,7 @@
 <ul class="posts">
     {% for post in posts %}
     <li class="post">
+        <a class="post-stretched-link" href="{{ url_for('.post', id=post.id) }}" aria-label="View post"></a>
         <div class="post-thumbnail">
             <a href="{{ url_for('.user', username=post.author.username) }}">
                 <img class="img-rounded profile-thumbnail" src="{{ post.author.gravatar(size=40) }}">
