@@ -1,6 +1,6 @@
 # StaffRoom
 
-![CI](https://github.com/mahmoudnasser1561/FlaskForge/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/mahmoudnasser1561/StaffRoom/actions/workflows/ci.yml/badge.svg)
 
 <p align="center">
   <img src="docs/demo.gif" alt="StaffRoom demo">
