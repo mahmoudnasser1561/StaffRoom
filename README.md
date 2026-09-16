@@ -2,7 +2,9 @@
 
 ![CI](https://github.com/mahmoudnasser1561/FlaskForge/actions/workflows/ci.yml/badge.svg)
 
-![StaffRoom demo](docs/demo.gif)
+<p align="center">
+  <img src="docs/demo.gif" alt="StaffRoom demo">
+</p>
 
 *Feed and posting, comments and notifications, follow/unfollow, AI
 content moderation, and the policy chatbot, all recorded from a
